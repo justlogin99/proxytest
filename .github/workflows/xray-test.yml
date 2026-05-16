@@ -29,8 +29,10 @@ jobs:
           echo "Xray version: $XRAY_VERSION"
           curl -L -o xray.zip \
             "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"
-          unzip -o xray.zip xray
-          chmod +x xray
+          mkdir -p xray_tmp
+          unzip -o xray.zip -d xray_tmp
+          find xray_tmp -type f -name "xray" | head -1 | xargs -I{} cp {} ./xray
+          chmod +x ./xray
           ./xray version
 
       - name: Run connectivity test
