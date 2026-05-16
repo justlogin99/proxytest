@@ -38,7 +38,7 @@ jobs:
       - name: Run connectivity test
         id: test
         run: |
-          python xarytest/xarytesting.py
+          python xraytest/xarytesting.py
         continue-on-error: true
 
       - name: Upload last config.json
