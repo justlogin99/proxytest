@@ -2,11 +2,6 @@ name: Xray Node Connectivity Test
 
 on:
   workflow_dispatch:
-    inputs:
-      proxy_url:
-        description: '节点列表（多个节点用英文逗号或换行分隔，支持 vless/vmess/trojan/ss/socks5）'
-        required: true
-        type: string
 
 jobs:
   test-nodes:
@@ -15,53 +10,35 @@ jobs:
     timeout-minutes: 15
 
     env:
-      PROXY_URL: ${{ github.event.inputs.proxy_url }}
+      PROXY_URL: ${{ vars.PROXY_URL }}
       XRAY_BIN: ./xray
 
     steps:
-      # -------------------------------------------------------
-      # 1. 检出代码
-      # -------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # -------------------------------------------------------
-      # 2. 安装 Python
-      # -------------------------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # -------------------------------------------------------
-      # 3. 下载 Xray-core（最新 Linux amd64）
-      # -------------------------------------------------------
       - name: Download Xray-core
         run: |
           XRAY_VERSION=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest \
             | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
           echo "Xray version: $XRAY_VERSION"
-
           curl -L -o xray.zip \
             "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"
-
           unzip -o xray.zip xray
           chmod +x xray
           ./xray version
 
-      # -------------------------------------------------------
-      # 4. 运行测试脚本
-      # -------------------------------------------------------
       - name: Run connectivity test
         id: test
         run: |
           python xary/xarytesting.py
-        # 即使有节点失败也继续（汇总后再决定整体状态）
         continue-on-error: true
 
-      # -------------------------------------------------------
-      # 5. 上传生成的最后一份 config.json（方便调试）
-      # -------------------------------------------------------
       - name: Upload last config.json
         if: always()
         uses: actions/upload-artifact@v4
@@ -70,9 +47,6 @@ jobs:
           path: config.json
           retention-days: 1
 
-      # -------------------------------------------------------
-      # 6. 根据测试结果决定 job 最终状态
-      # -------------------------------------------------------
       - name: Evaluate result
         if: steps.test.outcome == 'failure'
         run: |
