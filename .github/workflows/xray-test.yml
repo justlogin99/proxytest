@@ -10,7 +10,7 @@ jobs:
     timeout-minutes: 15
 
     env:
-      PROXY_URL: ${{ vars.PROXY_URL }}
+      PROXY_URL: ${{ secrets.PROXY_URL }}
       XRAY_BIN: ./xray_bin
 
     steps:
