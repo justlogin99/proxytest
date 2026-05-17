@@ -36,7 +36,7 @@ import proxy_handler
 SING_BOX_BIN    = os.environ.get("SING_BOX_BIN", "./sing-box")
 LISTEN_HOST     = "127.0.0.1"
 LISTEN_PORT     = 8080
-TEST_URL        = os.environ.get("TEST_URL", "https://www.google.com")
+TEST_URL        = os.environ.get("TEST_URL", "https://api.ipify.org")
 HTTP_TIMEOUT    = int(os.environ.get("HTTP_TIMEOUT", "15"))
 BOOT_TIMEOUT    = float(os.environ.get("BOOT_TIMEOUT", "6"))
 CONFIG_FILE     = "config.json"
