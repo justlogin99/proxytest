@@ -63,7 +63,7 @@ jobs:
       - name: Run connectivity test
         id: test
         run: |
-          python xraytest/singboxtesting.py
+          python singboxtest/singboxtesting.py
         continue-on-error: true
 
       - name: Upload last config.json
