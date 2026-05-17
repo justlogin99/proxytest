@@ -16,7 +16,7 @@ LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = 8080
 
 # ============================================================
-# Protocol Parsers
+# Protocol Parsers (保持不变)
 # ============================================================
 def parse_socks5(parsed):
     outbound = {"type": "socks", "tag": "proxy", "server": parsed.hostname, "server_port": parsed.port or 1080, "version": "5"}
@@ -31,21 +31,6 @@ def parse_http(parsed):
     if parsed.scheme == "https": outbound["tls"] = {"enabled": True}
     return outbound
 
-def _extract_early_data(path):
-    """
-    从 WS path 中提取 ?ed=N，返回 (clean_path, early_data_size)。
-    xray 自动拆解 ?ed=，sing-box 需显式配置 max_early_data，
-    否则把 ?ed=2560 当字面 path 发出导致服务端匹配失败。
-    """
-    if not path or "ed=" not in path:
-        return path, 0
-    match = re.search(r'[?&]ed=(\d+)', path)
-    if not match:
-        return path, 0
-    size = int(match.group(1))
-    clean = re.sub(r'[?&]ed=\d+(&.*)?$', '', path).rstrip("?&") or "/"
-    return clean, size
-
 def parse_vless(parsed, params):
     outbound = {"type": "vless", "tag": "proxy", "server": parsed.hostname, "server_port": parsed.port or 443, "uuid": parsed.username}
     flow = params.get("flow", [""])[0]
@@ -59,10 +44,8 @@ def parse_vless(parsed, params):
         if fp: tls["utls"] = {"enabled": True, "fingerprint": fp}
         alpn = params.get("alpn", [""])[0]
         if alpn: tls["alpn"] = alpn.split(",")
-        # insecure 仅普通 TLS 设置；Reality 不设（xray 忽略，sing-box 可能异常）
-        if security == "tls":
-            insecure = params.get("insecure", params.get("allowInsecure", ["0"]))[0]
-            if insecure == "1": tls["insecure"] = True
+        insecure = params.get("insecure", params.get("allowInsecure", ["0"]))[0]
+        if insecure == "1": tls["insecure"] = True
         if security == "reality":
             reality = {"enabled": True}
             pbk = params.get("pbk", [""])[0]
@@ -70,19 +53,12 @@ def parse_vless(parsed, params):
             sid = params.get("sid", [""])[0]
             if sid: reality["short_id"] = sid
             tls["reality"] = reality
-            # 限制曲线为 x25519，兼容新版 xray 服务端
-            tls["curve_preferences"] = "x25519"
         outbound["tls"] = tls
     net_type = params.get("type", [""])[0]
     if net_type == "ws":
         transport = {"type": "ws"}
         path = params.get("path", [""])[0]
-        clean_path, early_data_size = _extract_early_data(unquote(path))
-        if clean_path: transport["path"] = clean_path
-        # ?ed=N 拆解为 max_early_data（sing-box 不自动处理，xray 会自动处理）
-        if early_data_size > 0:
-            transport["max_early_data"] = early_data_size
-            transport["early_data_header_name"] = "Sec-WebSocket-Protocol"
+        if path: transport["path"] = unquote(path)
         host = params.get("host", [""])[0]
         if host: transport["headers"] = {"Host": host}
         outbound["transport"] = transport
@@ -118,19 +94,11 @@ def parse_vmess(url_str):
         elif cfg.get("host"): tls["server_name"] = cfg["host"]
         alpn = cfg.get("alpn", "")
         if alpn: tls["alpn"] = alpn.split(",")
-        fp = cfg.get("fp", "")
-        if fp: tls["utls"] = {"enabled": True, "fingerprint": fp}
         outbound["tls"] = tls
     net = cfg.get("net", "tcp")
     if net == "ws":
         transport = {"type": "ws"}
-        path = cfg.get("path", "")
-        clean_path, early_data_size = _extract_early_data(path)
-        if clean_path: transport["path"] = clean_path
-        # ?ed=N 拆解为 max_early_data（sing-box 不自动处理，xray 会自动处理）
-        if early_data_size > 0:
-            transport["max_early_data"] = early_data_size
-            transport["early_data_header_name"] = "Sec-WebSocket-Protocol"
+        if cfg.get("path"): transport["path"] = cfg["path"]
         if cfg.get("host"): transport["headers"] = {"Host": cfg["host"]}
         outbound["transport"] = transport
     elif net == "grpc":
@@ -192,10 +160,10 @@ def parse_all_urls():
     if not raw_url:
         print("PROXY_URL is empty, skipping.")
         sys.exit(0)
-
+        
     url_list = re.split(r'[,\n]', raw_url)
     url_list = [u.strip() for u in url_list if u.strip()]
-
+    
     outbounds = []
     for idx, proxy_url in enumerate(url_list):
         scheme = proxy_url.split("://")[0].lower()
@@ -211,32 +179,35 @@ def parse_all_urls():
                 elif scheme in ("hy2", "hysteria2"): outbound = parse_hysteria2(parsed, params)
                 elif scheme == "tuic": outbound = parse_tuic(parsed, params)
                 else: print(f"⚠️ 忽略不支持的协议: {scheme}"); continue
-
+            
             outbound["tag"] = f"proxy-{idx}"
             outbounds.append(outbound)
         except Exception as e:
             print(f"⚠️ 解析第 {idx+1} 个节点失败: {e}")
-
+            
     return outbounds
 
 def generate_config(target_index, outbounds):
     """根据索引生成单节点直连配置"""
     if target_index >= len(outbounds):
         return False
-
+        
+    # 深拷贝避免修改原数据
     selected = json.loads(json.dumps(outbounds[target_index]))
     selected_tag = selected["tag"]
+    
+    # 强制将 tag 改为 proxy，直接出站，不套 urltest
     selected["tag"] = "proxy"
-
+    
     config = {
         "log": {"level": "warn", "timestamp": True},
         "inbounds": [{"type": "http", "tag": "http-in", "listen": LISTEN_HOST, "listen_port": LISTEN_PORT}],
         "outbounds": [selected, {"type": "direct", "tag": "direct"}]
     }
-
+    
     with open("config.json", "w") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
-
+    
     print(f"✅ 已生成节点 {selected_tag} 的专属配置")
     return True
 
@@ -245,21 +216,23 @@ if __name__ == "__main__":
     parser.add_argument('--index', type=int, default=-1, help='Specify node index to generate single config')
     parser.add_argument('--count', action='store_true', help='Only return total node count')
     args = parser.parse_args()
-
+    
     all_outbounds = parse_all_urls()
     if not all_outbounds:
         print("❌ 没有成功解析出任何可用节点！")
         sys.exit(1)
-
+        
     if args.count:
+        # 仅供主脚本查询节点数量
         print(len(all_outbounds))
         sys.exit(0)
-
+        
     if args.index >= 0:
         if not generate_config(args.index, all_outbounds):
             print(f"❌ 索引 {args.index} 超出节点范围")
             sys.exit(1)
     else:
+        # 默认行为：打印节点信息
         print(f"✅ 成功解析 {len(all_outbounds)} 个节点")
         for idx, ob in enumerate(all_outbounds):
             print(f"  [{idx}] {ob['tag']} ({ob['type']}) -> {ob['server']}:{ob['server_port']}")
