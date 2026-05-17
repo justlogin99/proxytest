@@ -12,12 +12,15 @@ Supports single-node mode via --index for retry loop.
   - http / https
   - hysteria2 / hy2
   - tuic
+  - shadowsocks
 
-说明：
-  针对 Cloudflare / Argo / WS + TLS 场景做了兼容：
-    - WS + TLS 默认 alpn = ["http/1.1"]
-    - gRPC + TLS 默认 alpn = ["h2"]
-    - TLS 默认启用 utls chrome
+修复记录：
+  1. WS path 中的 ?ed=N 自动拆解为 max_early_data + early_data_header_name
+     （xray 自动拆解，sing-box 不拆解，需手动处理）
+  2. Reality 节点不设 insecure（xray 静默忽略，sing-box 行为异常）
+  3. 移除对 WS+TLS 自动补 alpn=["http/1.1"] 的逻辑
+     （xray 默认不设 alpn，强制 http/1.1 会影响 Cloudflare h2 协商）
+  4. gRPC 同理，移除自动补 alpn=["h2"]
 """
 
 import os
@@ -90,6 +93,43 @@ def normalize_net_type(net):
     return net
 
 
+def extract_early_data(path):
+    """
+    从 WS path 中提取 ?ed=N 参数，返回 (clean_path, early_data_size)。
+
+    xray 客户端遇到 path 里的 ?ed=N 会自动拆解：
+      - 实际 WebSocket 握手 path 变为 clean_path（不含 ?ed=）
+      - 启用 early data，Sec-WebSocket-Protocol header 带 early data
+
+    sing-box 不做此拆解，需显式配置 max_early_data + early_data_header_name。
+    若不拆解，sing-box 会把 /vmess-argo?ed=2560 作为字面 path 发出，
+    导致服务端 path 匹配失败而连接不通。
+    """
+    if not path or "ed=" not in path:
+        return path, 0
+
+    # 支持 ?ed=N 和 &ed=N，以及后面可能跟其他参数的情况
+    match = re.search(r'[?&]ed=(\d+)', path)
+    if not match:
+        return path, 0
+
+    early_data_size = int(match.group(1))
+
+    # 移除 ?ed=N 或 &ed=N（包括后续参数），清理残余的 ? 或 &
+    clean = re.sub(r'[?&]ed=\d+(&.*)?$', '', path)
+    # 如果原来是 /path?ed=N，清理后变成 /path，正常
+    # 如果原来是 /path?foo=bar&ed=N，清理后变成 /path?foo=bar
+    clean = clean.rstrip("?&")
+    if not clean:
+        clean = "/"
+
+    return clean, early_data_size
+
+
+# ============================================================
+# TLS / Transport builders
+# ============================================================
+
 def add_common_tls(
     outbound,
     security,
@@ -104,10 +144,12 @@ def add_common_tls(
     """
     给 sing-box outbound 添加通用 TLS / Reality 配置。
 
-    Cloudflare / WS-TLS 兼容：
-      - WS 自动 alpn http/1.1
-      - gRPC 自动 alpn h2
-      - 默认 utls chrome
+    修复点：
+      - Reality 节点不添加 insecure 字段
+        xray 对 Reality + allowInsecure 静默忽略，sing-box 某些版本会异常
+      - 不再对 WS/gRPC 自动补 alpn
+        xray 默认不设 alpn（由服务端协商），强制 http/1.1 会影响 Cloudflare h2 协商
+        只有 URL 里明确指定了 alpn 参数才写入配置
     """
     security = (security or "").lower()
     net_type = normalize_net_type(net_type)
@@ -123,23 +165,20 @@ def add_common_tls(
     if server_name:
         tls["server_name"] = server_name
 
+    # 只有明确指定了 alpn 才写入，不自动补默认值
     alpn_list = split_alpn(alpn)
     if alpn_list:
         tls["alpn"] = alpn_list
-    else:
-        if net_type == "ws":
-            tls["alpn"] = ["http/1.1"]
-        elif net_type == "grpc":
-            tls["alpn"] = ["h2"]
 
-    # Cloudflare 场景建议默认 chrome 指纹
+    # Reality 和普通 TLS 都需要 utls（Reality 强依赖 uTLS 做指纹伪装）
     fingerprint = fp or "chrome"
     tls["utls"] = {
         "enabled": True,
         "fingerprint": fingerprint
     }
 
-    if is_true(insecure):
+    # insecure：Reality 不设此字段，普通 TLS 才设
+    if security == "tls" and is_true(insecure):
         tls["insecure"] = True
 
     if security == "reality":
@@ -173,9 +212,11 @@ def add_common_tls(
 def add_transport(outbound, net_type, path="", host="", service_name="", mode=""):
     """
     添加 sing-box transport。
-    说明：
-      这里默认保留 ?ed=2048 在 path 中，不拆 max_early_data。
-      这样兼容性更稳，避免老版本 sing-box check 失败。
+
+    修复点：
+      WS path 中的 ?ed=N 需拆解为 max_early_data + early_data_header_name。
+      xray 自动处理 ?ed=，sing-box 不处理，必须显式配置。
+      early_data_header_name 固定为 "Sec-WebSocket-Protocol"（Cloudflare Argo 标准）。
     """
     net_type = normalize_net_type(net_type)
 
@@ -184,8 +225,15 @@ def add_transport(outbound, net_type, path="", host="", service_name="", mode=""
             "type": "ws"
         }
 
-        if path:
-            transport["path"] = unquote(path)
+        clean_path, early_data_size = extract_early_data(path)
+
+        if clean_path:
+            transport["path"] = unquote(clean_path)
+
+        # early data 配置（对应 xray 的 ?ed=N）
+        if early_data_size > 0:
+            transport["max_early_data"] = early_data_size
+            transport["early_data_header_name"] = "Sec-WebSocket-Protocol"
 
         if host:
             transport["headers"] = {
