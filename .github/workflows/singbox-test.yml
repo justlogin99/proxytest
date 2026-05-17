@@ -1,0 +1,81 @@
+name: sing-box Node Connectivity Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-nodes:
+    name: Test Proxy Nodes with sing-box
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      PROXY_URL: ${{ secrets.PROXY_URL }}
+      SING_BOX_BIN: ./sing-box
+      TEST_URL: https://www.google.com
+      HTTP_TIMEOUT: 15
+      BOOT_TIMEOUT: 6
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download sing-box
+        run: |
+          set -e
+
+          DOWNLOAD_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+            | grep "browser_download_url" \
+            | grep "linux-amd64.tar.gz" \
+            | cut -d '"' -f 4 \
+            | head -n 1)
+
+          echo "Download URL: $DOWNLOAD_URL"
+
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "Failed to get sing-box download url"
+            exit 1
+          fi
+
+          curl -L -o sing-box.tar.gz "$DOWNLOAD_URL"
+
+          mkdir -p singbox_tmp
+          tar -xzf sing-box.tar.gz -C singbox_tmp
+
+          FOUND_BIN=$(find singbox_tmp -type f -name sing-box | head -n 1)
+
+          if [ -z "$FOUND_BIN" ]; then
+            echo "sing-box binary not found"
+            find singbox_tmp -maxdepth 3 -type f
+            exit 1
+          fi
+
+          cp "$FOUND_BIN" ./sing-box
+          chmod +x ./sing-box
+
+          ./sing-box version
+
+      - name: Run connectivity test
+        id: test
+        run: |
+          python xraytest/singboxtesting.py
+        continue-on-error: true
+
+      - name: Upload last config.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: last-singbox-config
+          path: config.json
+          retention-days: 1
+
+      - name: Evaluate result
+        if: steps.test.outcome == 'failure'
+        run: |
+          echo "::warning::部分或全部节点测试失败，请查看上方日志"
+          exit 1
